@@ -3,47 +3,62 @@ from supabase import create_client, Client
 import requests
 import re
 import pandas as pd
+import time
 
 # --- 1. Supabase 설정 ---
 URL = st.secrets["SUPABASE_URL"]
 KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(URL, KEY)
 
-# --- 2. 크롤링 함수 (403 우회) ---
-def get_klook_data(url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'Cache-Control': 'max-age=0',
-    }
-    try:
-        session = requests.Session()
-        # 먼저 메인 페이지 방문해서 쿠키 획득
-        session.get("https://www.klook.com", headers=headers, timeout=10)
-        # 실제 상품 페이지 요청
-        response = session.get(url, headers=headers, timeout=15)
+# --- 2. 크롤링 함수 (403 우회 + 재시도) ---
+def get_klook_data(url, retries=3):
+    user_agents = [
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+    ]
+    for attempt in range(retries):
+        headers = {
+            'User-Agent': user_agents[attempt % len(user_agents)],
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        }
+        try:
+            session = requests.Session()
+            session.get("https://www.klook.com", headers=headers, timeout=10)
+            time.sleep(2 + attempt * 2)  # 2초, 4초, 6초 간격
+            response = session.get(url, headers=headers, timeout=15)
 
-        if response.status_code != 200:
-            return None, None, response.status_code
+            if response.status_code == 403:
+                time.sleep(3 + attempt * 2)
+                continue
 
-        text = response.text
-        participant_match = re.search(r'"product_participant_count"\s*:\s*(\d+)', text)
-        review_match = re.search(r'"reviewCount"\s*:\s*(\d+)', text)
+            if response.status_code != 200:
+                return None, None, response.status_code
 
-        participant_count = int(participant_match.group(1)) if participant_match else None
-        review_count = int(review_match.group(1)) if review_match else None
+            text = response.text
+            participant_match = re.search(r'"product_participant_count"\s*:\s*(\d+)', text)
+            review_match = re.search(r'"reviewCount"\s*:\s*(\d+)', text)
 
-        return participant_count, review_count, response.status_code
-    except Exception as e:
-        return None, None, str(e)
+            participant_count = int(participant_match.group(1)) if participant_match else None
+            review_count = int(review_match.group(1)) if review_match else None
+
+            return participant_count, review_count, response.status_code
+
+        except Exception as e:
+            if attempt == retries - 1:
+                return None, None, str(e)
+            time.sleep(3)
+
+    return None, None, 403
 
 # --- 3. 로그 저장 + 최대 10개 유지 ---
 def save_log_with_limit(product_url, participant_count, review_count):
