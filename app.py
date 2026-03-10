@@ -175,16 +175,32 @@ try:
                     st.write("---")
                     btn_col1, btn_col2 = st.columns(2)
 
-                    if btn_col1.button("🔄 즉시 수집", key=f"upd_{item['url']}"):
-                        p, r, code = get_klook_data(item['url'])
+                    collecting_key = f"collecting_{item['url']}"
+                    if collecting_key not in st.session_state:
+                        st.session_state[collecting_key] = False
+                    is_collecting = st.session_state[collecting_key]
+
+                    if btn_col1.button(
+                        "⏳ 수집 중..." if is_collecting else "🔄 즉시 수집",
+                        key=f"upd_{item['url']}",
+                        disabled=is_collecting,
+                        use_container_width=True
+                    ):
+                        st.session_state[collecting_key] = True
+                        st.rerun()
+
+                    if is_collecting:
+                        with st.spinner("수집 중입니다. 잠시만 기다려주세요..."):
+                            p, r, code = get_klook_data(item['url'])
+                        st.session_state[collecting_key] = False
                         if p is not None or r is not None:
                             save_log_with_limit(item['url'], p, r)
                             st.toast(f"✅ 수집 완료! 참여자: {p:,} / 리뷰: {r:,}")
-                            st.rerun()
                         else:
                             st.error(f"데이터를 가져오지 못했습니다. (상태코드: {code})")
+                        st.rerun()
 
-                    if btn_col2.button("🗑️ 삭제", key=f"del_{item['url']}"):
+                    if btn_col2.button("🗑️ 삭제", key=f"del_{item['url']}", disabled=is_collecting):
                         supabase.table("tracked_products").delete().eq("url", item['url']).execute()
                         st.warning("상품이 삭제되었습니다.")
                         st.rerun()
