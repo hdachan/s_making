@@ -1,12 +1,17 @@
 
-# 서버용
 
+# 로컬용
+
+
+import os
 import re
 import time
-import requests
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 
 # --- 1. Supabase 설정 ---
 URL = st.secrets["SUPABASE_URL"]
@@ -14,7 +19,51 @@ KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(URL, KEY)
 
 
-# --- 2. requests 크롤링 함수 ---
+# --- 2. Selenium 브라우저 설정 (로컬/클라우드 자동 감지) ---
+def get_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--remote-debugging-port=9222")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    # Streamlit Cloud (Linux) vs 로컬 자동 감지
+    if os.path.exists("/usr/bin/chromium"):
+        options.binary_location = "/usr/bin/chromium"
+        driver = webdriver.Chrome(
+            service=Service("/usr/bin/chromedriver"),
+            options=options
+        )
+    elif os.path.exists("/usr/bin/chromium-browser"):
+        options.binary_location = "/usr/bin/chromium-browser"
+        driver = webdriver.Chrome(
+            service=Service("/usr/bin/chromedriver"),
+            options=options
+        )
+    else:
+        # 로컬 환경 (Windows/Mac)
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=options
+        )
+
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    })
+    return driver
+
+
+# --- 3. 크롤링 함수 ---
 def get_klook_data(url):
     participant_patterns = [
         r'"product_participant_count"\s*:\s*(\d+)',
@@ -36,33 +85,18 @@ def get_klook_data(url):
         r'"comment_count"\s*:\s*(\d+)',
     ]
 
+    driver = None
     try:
         clean_url = url.split('?')[0]
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Referer": "https://www.klook.com/",
-        }
+        driver = get_driver()
+        driver.get(clean_url)
+        time.sleep(10)
 
-        session = requests.Session()
-        # 첫 요청으로 쿠키 획득
-        session.get("https://www.klook.com/", headers=headers, timeout=15)
-        time.sleep(1)
-        # 실제 페이지 요청
-        resp = session.get(clean_url, headers=headers, timeout=15)
-
-        if resp.status_code == 403:
-            return None, None, "403 차단됨"
-
-        text = resp.text
+        try:
+            klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)") or ""
+        except Exception:
+            klook_json = ""
+        text = klook_json + driver.page_source
 
         participant_count = None
         for pattern in participant_patterns:
@@ -78,44 +112,45 @@ def get_klook_data(url):
                 review_count = int(match.group(1))
                 break
 
-        return participant_count, review_count, resp.status_code
+        return participant_count, review_count, 200
 
     except Exception as e:
         return None, None, str(e)
+    finally:
+        if driver:
+            driver.quit()
 
 
-# --- 2-1. 디버그용: 소스에서 숫자형 키 전체 추출 ---
+# --- 3-1. 디버그용: 소스에서 숫자형 키 전체 추출 ---
 def get_raw_keys(url):
+    driver = None
     try:
         clean_url = url.split('?')[0]
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
-            "Referer": "https://www.klook.com/",
-        }
-        session = requests.Session()
-        session.get("https://www.klook.com/", headers=headers, timeout=15)
-        time.sleep(1)
-        resp = session.get(clean_url, headers=headers, timeout=15)
-        text = resp.text
+        driver = get_driver()
+        driver.get(clean_url)
+        time.sleep(10)
+
+        try:
+            klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)") or ""
+        except Exception:
+            klook_json = ""
+        text = klook_json + driver.page_source
 
         all_matches = re.findall(r'"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:\s*(\d{2,})', text)
         seen = {}
         for k, v in all_matches:
             if k not in seen:
                 seen[k] = v
-        return resp.status_code, list(seen.items())
+        return 200, list(seen.items())
 
     except Exception as e:
         return str(e), []
+    finally:
+        if driver:
+            driver.quit()
 
 
-# --- 3. 로그 저장 + 최대 10개 유지 ---
+# --- 4. 로그 저장 + 최대 10개 유지 ---
 def save_log_with_limit(product_url, participant_count, review_count):
     supabase.table("product_logs").insert({
         "product_url": product_url,
@@ -134,10 +169,10 @@ def save_log_with_limit(product_url, participant_count, review_count):
             supabase.table("product_logs").delete().eq("id", log["id"]).execute()
 
 
-# --- 4. UI 설정 ---
+# --- 5. UI 설정 ---
 st.set_page_config(page_title="S-Marketing 분석 프로", layout="wide")
 st.title("📈 클룩 마케팅 성과 분석 대시보드")
-st.caption("🌐 수집 방식: requests (클라우드 배포용)")
+st.caption("🤖 수집 방식: Selenium (로컬 전용 권장)")
 
 with st.sidebar:
     st.header("⚙️ 관리 메뉴")
@@ -168,7 +203,7 @@ with st.sidebar:
 
         if col_d1.button("🔄 수집 테스트", use_container_width=True):
             if debug_url:
-                with st.spinner("요청 중..."):
+                with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                     try:
                         p, r, code = get_klook_data(debug_url)
                         st.write(f"**상태코드:** `{code}`")
@@ -183,7 +218,7 @@ with st.sidebar:
 
         if col_d2.button("🔬 키 분석", use_container_width=True):
             if debug_url:
-                with st.spinner("요청 중..."):
+                with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                     try:
                         status, keys = get_raw_keys(debug_url)
                         st.write(f"**상태코드:** `{status}`")
@@ -205,7 +240,7 @@ with st.sidebar:
     st.info("데이터는 worker.py를 통해 2시간마다 자동 수집됩니다.\n최대 10개 데이터 유지.")
 
 
-# --- 5. 메인 화면 ---
+# --- 6. 메인 화면 ---
 try:
     items = supabase.table("tracked_products").select("*").execute().data
 
@@ -273,7 +308,7 @@ try:
                         st.rerun()
 
                     if is_collecting:
-                        with st.spinner("요청 중..."):
+                        with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                             p, r, code = get_klook_data(item['url'])
                         st.session_state[collecting_key] = False
                         if p is not None or r is not None:
