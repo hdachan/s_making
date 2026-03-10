@@ -1,13 +1,12 @@
-import streamlit as st
-from supabase import create_client, Client
+import os
 import re
-import pandas as pd
 import time
-
+import streamlit as st
+import pandas as pd
+from supabase import create_client, Client
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 1. Supabase 설정 ---
 URL = st.secrets["SUPABASE_URL"]
@@ -15,7 +14,7 @@ KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(URL, KEY)
 
 
-# --- 2. Selenium 브라우저 설정 ---
+# --- 2. Selenium 브라우저 설정 (로컬/클라우드 자동 감지) ---
 def get_driver():
     options = Options()
     options.add_argument("--headless")
@@ -27,13 +26,30 @@ def get_driver():
     options.add_argument("--window-size=1920,1080")
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
+
+    # Streamlit Cloud (Linux) vs 로컬 Windows 자동 감지
+    if os.path.exists("/usr/bin/chromium"):
+        options.binary_location = "/usr/bin/chromium"
+        driver = webdriver.Chrome(
+            service=Service("/usr/bin/chromedriver"),
+            options=options
+        )
+    elif os.path.exists("/usr/bin/chromium-browser"):
+        options.binary_location = "/usr/bin/chromium-browser"
+        driver = webdriver.Chrome(
+            service=Service("/usr/bin/chromedriver"),
+            options=options
+        )
+    else:
+        # 로컬 환경 (Windows/Mac)
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=options
+        )
+
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
@@ -42,7 +58,6 @@ def get_driver():
 
 # --- 3. 크롤링 함수 ---
 def get_klook_data(url):
-    # 참여자 수: window.__KLOOK__ 안에 product_participant_count 로 들어있음
     participant_patterns = [
         r'"product_participant_count"\s*:\s*(\d+)',
         r'"participantCount"\s*:\s*(\d+)',
@@ -53,7 +68,6 @@ def get_klook_data(url):
         r'"totalBooked"\s*:\s*(\d+)',
         r'"sales_volume"\s*:\s*(\d+)',
     ]
-    # 리뷰 수: review_count 또는 reviewCount
     review_patterns = [
         r'"review_count"\s*:\s*(\d+)',
         r'"reviewCount"\s*:\s*(\d+)',
@@ -69,14 +83,14 @@ def get_klook_data(url):
         clean_url = url.split('?')[0]
         driver = get_driver()
         driver.get(clean_url)
-        time.sleep(5)  # JS 렌더링 충분히 대기
+        time.sleep(5)
 
-        # window.__KLOOK__ JSON에서 직접 추출 (page_source보다 확실)
+        # window.__KLOOK__ JS 추출 + page_source 둘 다 합쳐서 탐색 (가장 안정적)
         try:
-            klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)")
-            text = klook_json if klook_json else driver.page_source
+            klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)") or ""
         except Exception:
-            text = driver.page_source
+            klook_json = ""
+        text = klook_json + driver.page_source
 
         participant_count = None
         for pattern in participant_patterns:
@@ -110,7 +124,12 @@ def get_raw_keys(url):
         driver.get(clean_url)
         time.sleep(5)
 
-        text = driver.page_source
+        try:
+            klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)") or ""
+        except Exception:
+            klook_json = ""
+        text = klook_json + driver.page_source
+
         all_matches = re.findall(r'"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:\s*(\d{2,})', text)
         seen = {}
         for k, v in all_matches:
@@ -209,6 +228,8 @@ with st.sidebar:
                         st.error(f"오류: {e}")
 
     st.divider()
+    if st.button("🔁 전체 새로고침", use_container_width=True):
+        st.rerun()
     st.info("데이터는 worker.py를 통해 2시간마다 자동 수집됩니다.\n최대 10개 데이터 유지.")
 
 

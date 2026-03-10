@@ -2,3 +2,5 @@ streamlit
 supabase
 requests
 pandas
+selenium
+webdriver-manager
