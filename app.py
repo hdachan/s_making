@@ -17,27 +17,31 @@ supabase: Client = create_client(URL, KEY)
 # --- 2. Selenium 브라우저 설정 (로컬/클라우드 자동 감지) ---
 def get_driver():
     options = Options()
-    options.add_argument("--headless")
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--remote-debugging-port=9222")
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
 
-    # Streamlit Cloud (Linux) vs 로컬 Windows 자동 감지
-    if os.path.exists("/usr/bin/chromium"):
-        options.binary_location = "/usr/bin/chromium"
+    # Streamlit Cloud (Linux) vs 로컬 자동 감지
+    if os.path.exists("/usr/bin/chromium-browser"):
+        # Streamlit Cloud
+        options.binary_location = "/usr/bin/chromium-browser"
         driver = webdriver.Chrome(
             service=Service("/usr/bin/chromedriver"),
             options=options
         )
-    elif os.path.exists("/usr/bin/chromium-browser"):
-        options.binary_location = "/usr/bin/chromium-browser"
+    elif os.path.exists("/usr/bin/chromium"):
+        # 일부 Linux 환경
+        options.binary_location = "/usr/bin/chromium"
         driver = webdriver.Chrome(
             service=Service("/usr/bin/chromedriver"),
             options=options
@@ -83,9 +87,9 @@ def get_klook_data(url):
         clean_url = url.split('?')[0]
         driver = get_driver()
         driver.get(clean_url)
-        time.sleep(5)
+        time.sleep(10)  # 클라우드 환경 JS 로딩 대기
 
-        # window.__KLOOK__ JS 추출 + page_source 둘 다 합쳐서 탐색 (가장 안정적)
+        # window.__KLOOK__ JS 추출 + page_source 둘 다 합쳐서 탐색
         try:
             klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)") or ""
         except Exception:
@@ -122,7 +126,7 @@ def get_raw_keys(url):
         clean_url = url.split('?')[0]
         driver = get_driver()
         driver.get(clean_url)
-        time.sleep(5)
+        time.sleep(10)
 
         try:
             klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)") or ""
