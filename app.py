@@ -30,12 +30,15 @@ def get_klook_data(url, retries=3):
             'Sec-Fetch-Site': 'none',
             'Sec-Fetch-User': '?1',
             'Cache-Control': 'max-age=0',
+            'Referer': 'https://www.klook.com/en-US/',
+            'Sec-Fetch-Site': 'same-origin',
         }
         try:
+            clean_url = url.split('?')[0]  # 쿼리 파라미터 제거
             session = requests.Session()
             session.get("https://www.klook.com", headers=headers, timeout=10)
             time.sleep(2 + attempt * 2)  # 2초, 4초, 6초 간격
-            response = session.get(url, headers=headers, timeout=15)
+            response = session.get(clean_url, headers=headers, timeout=15)
 
             if response.status_code == 403:
                 time.sleep(3 + attempt * 2)
