@@ -1,0 +1,28 @@
+name: 클룩 데이터 자동 수집
+
+on:
+  schedule:
+    - cron: "0 * * * *" # 매 1시간마다 실행 (정각)
+  workflow_dispatch: # 수동 실행 버튼도 활성화
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 가져오기
+        uses: actions/checkout@v3
+
+      - name: Python 설치
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: 패키지 설치
+        run: pip install supabase requests
+
+      - name: 데이터 수집 실행
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python worker.py
