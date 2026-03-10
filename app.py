@@ -1,69 +1,131 @@
 import streamlit as st
 from supabase import create_client, Client
-import requests
 import re
 import pandas as pd
 import time
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 # --- 1. Supabase 설정 ---
 URL = st.secrets["SUPABASE_URL"]
 KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(URL, KEY)
 
-# --- 2. 크롤링 함수 (403 우회 + 재시도) ---
-def get_klook_data(url, retries=3):
-    user_agents = [
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
+
+# --- 2. Selenium 브라우저 설정 ---
+def get_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    })
+    return driver
+
+
+# --- 3. 크롤링 함수 ---
+def get_klook_data(url):
+    # 참여자 수: window.__KLOOK__ 안에 product_participant_count 로 들어있음
+    participant_patterns = [
+        r'"product_participant_count"\s*:\s*(\d+)',
+        r'"participantCount"\s*:\s*(\d+)',
+        r'"sold_count"\s*:\s*(\d+)',
+        r'"soldCount"\s*:\s*(\d+)',
+        r'"booked_count"\s*:\s*(\d+)',
+        r'"bookingCount"\s*:\s*(\d+)',
+        r'"totalBooked"\s*:\s*(\d+)',
+        r'"sales_volume"\s*:\s*(\d+)',
     ]
-    for attempt in range(retries):
-        headers = {
-            'User-Agent': user_agents[attempt % len(user_agents)],
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-            'Referer': 'https://www.klook.com/en-US/',
-            'Sec-Fetch-Site': 'same-origin',
-        }
+    # 리뷰 수: review_count 또는 reviewCount
+    review_patterns = [
+        r'"review_count"\s*:\s*(\d+)',
+        r'"reviewCount"\s*:\s*(\d+)',
+        r'"totalReview"\s*:\s*(\d+)',
+        r'"total_reviews"\s*:\s*(\d+)',
+        r'"ratingCount"\s*:\s*(\d+)',
+        r'"numReviews"\s*:\s*(\d+)',
+        r'"comment_count"\s*:\s*(\d+)',
+    ]
+
+    driver = None
+    try:
+        clean_url = url.split('?')[0]
+        driver = get_driver()
+        driver.get(clean_url)
+        time.sleep(5)  # JS 렌더링 충분히 대기
+
+        # window.__KLOOK__ JSON에서 직접 추출 (page_source보다 확실)
         try:
-            clean_url = url.split('?')[0]  # 쿼리 파라미터 제거
-            session = requests.Session()
-            session.get("https://www.klook.com", headers=headers, timeout=10)
-            time.sleep(2 + attempt * 2)  # 2초, 4초, 6초 간격
-            response = session.get(clean_url, headers=headers, timeout=15)
+            klook_json = driver.execute_script("return JSON.stringify(window.__KLOOK__)")
+            text = klook_json if klook_json else driver.page_source
+        except Exception:
+            text = driver.page_source
 
-            if response.status_code == 403:
-                time.sleep(3 + attempt * 2)
-                continue
+        participant_count = None
+        for pattern in participant_patterns:
+            match = re.search(pattern, text)
+            if match:
+                participant_count = int(match.group(1))
+                break
 
-            if response.status_code != 200:
-                return None, None, response.status_code
+        review_count = None
+        for pattern in review_patterns:
+            match = re.search(pattern, text)
+            if match:
+                review_count = int(match.group(1))
+                break
 
-            text = response.text
-            participant_match = re.search(r'"product_participant_count"\s*:\s*(\d+)', text)
-            review_match = re.search(r'"reviewCount"\s*:\s*(\d+)', text)
+        return participant_count, review_count, 200
 
-            participant_count = int(participant_match.group(1)) if participant_match else None
-            review_count = int(review_match.group(1)) if review_match else None
+    except Exception as e:
+        return None, None, str(e)
+    finally:
+        if driver:
+            driver.quit()
 
-            return participant_count, review_count, response.status_code
 
-        except Exception as e:
-            if attempt == retries - 1:
-                return None, None, str(e)
-            time.sleep(3)
+# --- 3-1. 디버그용: 소스에서 숫자형 키 전체 추출 ---
+def get_raw_keys(url):
+    driver = None
+    try:
+        clean_url = url.split('?')[0]
+        driver = get_driver()
+        driver.get(clean_url)
+        time.sleep(5)
 
-    return None, None, 403
+        text = driver.page_source
+        all_matches = re.findall(r'"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:\s*(\d{2,})', text)
+        seen = {}
+        for k, v in all_matches:
+            if k not in seen:
+                seen[k] = v
+        return 200, list(seen.items())
 
-# --- 3. 로그 저장 + 최대 10개 유지 ---
+    except Exception as e:
+        return str(e), []
+    finally:
+        if driver:
+            driver.quit()
+
+
+# --- 4. 로그 저장 + 최대 10개 유지 ---
 def save_log_with_limit(product_url, participant_count, review_count):
     supabase.table("product_logs").insert({
         "product_url": product_url,
@@ -81,11 +143,11 @@ def save_log_with_limit(product_url, participant_count, review_count):
         for log in excess:
             supabase.table("product_logs").delete().eq("id", log["id"]).execute()
 
-# --- 4. UI 설정 ---
+
+# --- 5. UI 설정 ---
 st.set_page_config(page_title="S-Marketing 분석 프로", layout="wide")
 st.title("📈 클룩 마케팅 성과 분석 대시보드")
 
-# 사이드바
 with st.sidebar:
     st.header("⚙️ 관리 메뉴")
 
@@ -102,37 +164,55 @@ with st.sidebar:
                     p, r, code = get_klook_data(item_url)
                     if p is not None or r is not None:
                         save_log_with_limit(item_url, p, r)
-                    st.success(f"등록 완료! (상태코드: {code})")
+                    st.success(f"등록 완료! (참여자: {p} / 리뷰: {r})")
                     st.rerun()
-                except:
-                    st.error("이미 등록된 URL입니다.")
+                except Exception as e:
+                    st.error(f"오류: {e}")
 
     st.divider()
 
-    # 🔍 디버그 패널
     with st.expander("🔍 크롤링 디버그", expanded=False):
         debug_url = st.text_input("테스트할 URL 입력", key="debug_url")
-        if st.button("소스 분석하기", use_container_width=True):
+        col_d1, col_d2 = st.columns(2)
+
+        if col_d1.button("🔄 수집 테스트", use_container_width=True):
             if debug_url:
-                with st.spinner("요청 중..."):
+                with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                     try:
                         p, r, code = get_klook_data(debug_url)
                         st.write(f"**상태코드:** `{code}`")
                         st.write(f"**참여자 수:** `{p}`")
                         st.write(f"**리뷰 수:** `{r}`")
-                        if code == 403:
-                            st.error("❌ 여전히 403 차단됨")
-                        elif p is None and r is None:
-                            st.warning("⚠️ 200인데 데이터 없음 - 키워드가 소스에 없음")
+                        if p is None and r is None:
+                            st.warning("⚠️ 데이터 없음 → '키 분석'으로 소스 확인 필요")
                         else:
                             st.success("✅ 정상 수집!")
+                    except Exception as e:
+                        st.error(f"오류: {e}")
+
+        if col_d2.button("🔬 키 분석", use_container_width=True):
+            if debug_url:
+                with st.spinner("브라우저 실행 중... (10~20초 소요)"):
+                    try:
+                        status, keys = get_raw_keys(debug_url)
+                        st.write(f"**상태코드:** `{status}`")
+                        if not keys:
+                            st.warning("⚠️ 숫자형 키를 찾지 못했습니다.")
+                        else:
+                            st.success(f"✅ {len(keys)}개 키 발견")
+                            df_keys = pd.DataFrame(keys, columns=["키명", "값"])
+                            df_keys["값"] = pd.to_numeric(df_keys["값"])
+                            df_keys = df_keys.sort_values("값", ascending=False)
+                            st.dataframe(df_keys, use_container_width=True)
+                            st.caption("💡 참여자수/리뷰수에 해당하는 키명을 확인하세요")
                     except Exception as e:
                         st.error(f"오류: {e}")
 
     st.divider()
     st.info("데이터는 worker.py를 통해 2시간마다 자동 수집됩니다.\n최대 10개 데이터 유지.")
 
-# --- 5. 메인 화면 ---
+
+# --- 6. 메인 화면 ---
 try:
     items = supabase.table("tracked_products").select("*").execute().data
 
@@ -140,7 +220,10 @@ try:
         st.info("좌측 메뉴에서 상품을 먼저 등록해 주세요.")
     else:
         for item in items:
-            with st.expander(f"📍 {item.get('product_name') or '이름 없음'}  |  {item['url'][:50]}...", expanded=True):
+            with st.expander(
+                f"📍 {item.get('product_name') or '이름 없음'}  |  {item['url'][:50]}...",
+                expanded=True
+            ):
                 st.markdown(f"🔗 [클룩 페이지 바로가기]({item['url']})", unsafe_allow_html=True)
 
                 col_info, col_chart = st.columns([1, 2])
@@ -163,6 +246,8 @@ try:
                                     diff = current_p - logs_res[1]['participant_count']
                                     color = 'green' if diff >= 0 else 'red'
                                     st.write(f"변화: :{color}[{'+' if diff >= 0 else ''}{diff:,}]")
+                            else:
+                                st.metric("👥 참여자 수", "수집 안됨")
                         with col_r:
                             if current_r is not None:
                                 st.metric("⭐ 리뷰 수", f"{current_r:,}")
@@ -170,6 +255,8 @@ try:
                                     diff = current_r - logs_res[1]['review_count']
                                     color = 'green' if diff >= 0 else 'red'
                                     st.write(f"변화: :{color}[{'+' if diff >= 0 else ''}{diff:,}]")
+                            else:
+                                st.metric("⭐ 리뷰 수", "수집 안됨")
 
                         st.caption(f"최종 업데이트: {logs_res[0]['created_at'][:19]}")
                     else:
@@ -193,14 +280,16 @@ try:
                         st.rerun()
 
                     if is_collecting:
-                        with st.spinner("수집 중입니다. 잠시만 기다려주세요..."):
+                        with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                             p, r, code = get_klook_data(item['url'])
                         st.session_state[collecting_key] = False
                         if p is not None or r is not None:
                             save_log_with_limit(item['url'], p, r)
-                            st.toast(f"✅ 수집 완료! 참여자: {p:,} / 리뷰: {r:,}")
+                            p_str = f"{p:,}" if p is not None else "없음"
+                            r_str = f"{r:,}" if r is not None else "없음"
+                            st.toast(f"✅ 수집 완료! 참여자: {p_str} / 리뷰: {r_str}")
                         else:
-                            st.error(f"데이터를 가져오지 못했습니다. (상태코드: {code})")
+                            st.error(f"데이터를 가져오지 못했습니다. (코드: {code})\n💡 디버그 > 키 분석으로 소스를 확인해보세요.")
                         st.rerun()
 
                     if btn_col2.button("🗑️ 삭제", key=f"del_{item['url']}", disabled=is_collecting):
@@ -209,7 +298,8 @@ try:
                         st.rerun()
 
                 with col_chart:
-                    all_logs = supabase.table("product_logs").select("participant_count, review_count, created_at") \
+                    all_logs = supabase.table("product_logs") \
+                        .select("participant_count, review_count, created_at") \
                         .eq("product_url", item['url']) \
                         .order("created_at", desc=False) \
                         .execute().data
