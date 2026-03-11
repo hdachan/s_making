@@ -1,144 +1,21 @@
-
-# 서버용
-
-import re
-import time
-import requests
 import streamlit as st
 import pandas as pd
-from supabase import create_client, Client
-
-# --- 1. Supabase 설정 ---
-URL = st.secrets["SUPABASE_URL"]
-KEY = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(URL, KEY)
+from utils import get_klook_data, get_raw_keys, save_log_with_limit
+from supabase import create_client
 
 
-# --- 2. requests 크롤링 함수 ---
-def get_klook_data(url):
-    participant_patterns = [
-        r'"product_participant_count"\s*:\s*(\d+)',
-        r'"participantCount"\s*:\s*(\d+)',
-        r'"sold_count"\s*:\s*(\d+)',
-        r'"soldCount"\s*:\s*(\d+)',
-        r'"booked_count"\s*:\s*(\d+)',
-        r'"bookingCount"\s*:\s*(\d+)',
-        r'"totalBooked"\s*:\s*(\d+)',
-        r'"sales_volume"\s*:\s*(\d+)',
-    ]
-    review_patterns = [
-        r'"review_count"\s*:\s*(\d+)',
-        r'"reviewCount"\s*:\s*(\d+)',
-        r'"totalReview"\s*:\s*(\d+)',
-        r'"total_reviews"\s*:\s*(\d+)',
-        r'"ratingCount"\s*:\s*(\d+)',
-        r'"numReviews"\s*:\s*(\d+)',
-        r'"comment_count"\s*:\s*(\d+)',
-    ]
-
-    try:
-        clean_url = url.split('?')[0]
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Referer": "https://www.klook.com/",
-        }
-
-        session = requests.Session()
-        # 첫 요청으로 쿠키 획득
-        session.get("https://www.klook.com/", headers=headers, timeout=15)
-        time.sleep(1)
-        # 실제 페이지 요청
-        resp = session.get(clean_url, headers=headers, timeout=15)
-
-        if resp.status_code == 403:
-            return None, None, "403 차단됨"
-
-        text = resp.text
-
-        participant_count = None
-        for pattern in participant_patterns:
-            match = re.search(pattern, text)
-            if match:
-                participant_count = int(match.group(1))
-                break
-
-        review_count = None
-        for pattern in review_patterns:
-            match = re.search(pattern, text)
-            if match:
-                review_count = int(match.group(1))
-                break
-
-        return participant_count, review_count, resp.status_code
-
-    except Exception as e:
-        return None, None, str(e)
+# --- Supabase: 매번 새 클라이언트 생성 (캐시 완전 차단) ---
+def get_supabase():
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 
-# --- 2-1. 디버그용: 소스에서 숫자형 키 전체 추출 ---
-def get_raw_keys(url):
-    try:
-        clean_url = url.split('?')[0]
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
-            "Referer": "https://www.klook.com/",
-        }
-        session = requests.Session()
-        session.get("https://www.klook.com/", headers=headers, timeout=15)
-        time.sleep(1)
-        resp = session.get(clean_url, headers=headers, timeout=15)
-        text = resp.text
-
-        all_matches = re.findall(r'"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:\s*(\d{2,})', text)
-        seen = {}
-        for k, v in all_matches:
-            if k not in seen:
-                seen[k] = v
-        return resp.status_code, list(seen.items())
-
-    except Exception as e:
-        return str(e), []
-
-
-# --- 3. 로그 저장 + 최대 10개 유지 ---
-def save_log_with_limit(product_url, participant_count, review_count):
-    supabase.table("product_logs").insert({
-        "product_url": product_url,
-        "participant_count": participant_count,
-        "review_count": review_count
-    }).execute()
-
-    all_logs = supabase.table("product_logs").select("id, created_at") \
-        .eq("product_url", product_url) \
-        .order("created_at", desc=False) \
-        .execute().data
-
-    if len(all_logs) > 10:
-        excess = all_logs[:len(all_logs) - 10]
-        for log in excess:
-            supabase.table("product_logs").delete().eq("id", log["id"]).execute()
-
-
-# --- 4. UI 설정 ---
+# --- UI 설정 ---
 st.set_page_config(page_title="S-Marketing 분석 프로", layout="wide")
 st.title("📈 클룩 마케팅 성과 분석 대시보드")
-st.caption("🌐 수집 방식: requests (클라우드 배포용)")
+st.caption("🤖 수집 방식: Selenium (로컬 전용 권장)")
 
+
+# --- 사이드바 ---
 with st.sidebar:
     st.header("⚙️ 관리 메뉴")
 
@@ -148,7 +25,7 @@ with st.sidebar:
         if st.button("등록하기", use_container_width=True):
             if item_url:
                 try:
-                    supabase.table("tracked_products").insert({
+                    get_supabase().table("tracked_products").insert({
                         "url": item_url,
                         "product_name": item_name
                     }).execute()
@@ -168,7 +45,7 @@ with st.sidebar:
 
         if col_d1.button("🔄 수집 테스트", use_container_width=True):
             if debug_url:
-                with st.spinner("요청 중..."):
+                with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                     try:
                         p, r, code = get_klook_data(debug_url)
                         st.write(f"**상태코드:** `{code}`")
@@ -183,7 +60,7 @@ with st.sidebar:
 
         if col_d2.button("🔬 키 분석", use_container_width=True):
             if debug_url:
-                with st.spinner("요청 중..."):
+                with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                     try:
                         status, keys = get_raw_keys(debug_url)
                         st.write(f"**상태코드:** `{status}`")
@@ -200,14 +77,44 @@ with st.sidebar:
                         st.error(f"오류: {e}")
 
     st.divider()
-    if st.button("🔁 전체 새로고침", use_container_width=True):
+
+    # ✅ 전체 즉시수집 버튼
+    if "collecting_all" not in st.session_state:
+        st.session_state["collecting_all"] = False
+
+    if st.button(
+        "⏳ 전체 수집 중..." if st.session_state["collecting_all"] else "🔁 전체 즉시수집",
+        disabled=st.session_state["collecting_all"],
+        use_container_width=True
+    ):
+        st.session_state["collecting_all"] = True
         st.rerun()
+
+    # 전체 즉시수집 실행
+    if st.session_state["collecting_all"]:
+        all_items = get_supabase().table("tracked_products").select("*").execute().data
+        total = len(all_items)
+        success_count = 0
+
+        progress = st.progress(0, text="전체 수집 시작...")
+        for i, it in enumerate(all_items):
+            progress.progress((i) / total, text=f"수집 중... ({i+1}/{total}) {it.get('product_name') or it['url'][:30]}")
+            p, r, code = get_klook_data(it['url'])
+            if p is not None or r is not None:
+                save_log_with_limit(it['url'], p, r)
+                success_count += 1
+
+        progress.progress(1.0, text="완료!")
+        st.session_state["collecting_all"] = False
+        st.toast(f"✅ 전체 수집 완료! ({success_count}/{total}개 성공)")
+        st.rerun()
+
     st.info("데이터는 worker.py를 통해 2시간마다 자동 수집됩니다.\n최대 10개 데이터 유지.")
 
 
-# --- 5. 메인 화면 ---
+# --- 메인 화면 ---
 try:
-    items = supabase.table("tracked_products").select("*").execute().data
+    items = get_supabase().table("tracked_products").select("*").execute().data
 
     if not items:
         st.info("좌측 메뉴에서 상품을 먼저 등록해 주세요.")
@@ -222,7 +129,7 @@ try:
                 col_info, col_chart = st.columns([1, 2])
 
                 with col_info:
-                    logs_res = supabase.table("product_logs").select("*") \
+                    logs_res = get_supabase().table("product_logs").select("*") \
                         .eq("product_url", item['url']) \
                         .order("created_at", desc=True) \
                         .limit(2).execute().data
@@ -273,7 +180,7 @@ try:
                         st.rerun()
 
                     if is_collecting:
-                        with st.spinner("요청 중..."):
+                        with st.spinner("브라우저 실행 중... (10~20초 소요)"):
                             p, r, code = get_klook_data(item['url'])
                         st.session_state[collecting_key] = False
                         if p is not None or r is not None:
@@ -286,12 +193,12 @@ try:
                         st.rerun()
 
                     if btn_col2.button("🗑️ 삭제", key=f"del_{item['url']}", disabled=is_collecting):
-                        supabase.table("tracked_products").delete().eq("url", item['url']).execute()
+                        get_supabase().table("tracked_products").delete().eq("url", item['url']).execute()
                         st.warning("상품이 삭제되었습니다.")
                         st.rerun()
 
                 with col_chart:
-                    all_logs = supabase.table("product_logs") \
+                    all_logs = get_supabase().table("product_logs") \
                         .select("participant_count, review_count, created_at") \
                         .eq("product_url", item['url']) \
                         .order("created_at", desc=False) \
