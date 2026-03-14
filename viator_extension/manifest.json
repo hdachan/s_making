@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "S-Marketing Viator 수집기",
+  "version": "1.0",
+  "description": "Viator 상품 페이지에서 popularityMetrics.count와 reviewCount를 자동 수집합니다.",
+  "permissions": ["activeTab", "scripting", "storage", "notifications"],
+  "host_permissions": ["https://www.viator.com/*", "https://*.supabase.co/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.viator.com/tours/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "S-Marketing Viator 수집기"
+  }
+}

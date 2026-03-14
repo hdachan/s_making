@@ -1,3 +1,6 @@
+
+#요고는 화면보면서 하는거 
+
 import streamlit as st
 import pandas as pd
 from utils import get_klook_data, get_raw_keys, save_log_with_limit
@@ -75,6 +78,73 @@ with st.sidebar:
                             st.caption("💡 참여자수/리뷰수에 해당하는 키명을 확인하세요")
                     except Exception as e:
                         st.error(f"오류: {e}")
+
+    st.divider()
+
+    # ✅ 선택 수집 섹션
+    with st.expander("☑️ 선택 즉시수집", expanded=True):
+        try:
+            all_items_for_select = get_supabase().table("tracked_products").select("*").execute().data
+        except:
+            all_items_for_select = []
+
+        if not all_items_for_select:
+            st.caption("등록된 상품이 없습니다.")
+        else:
+            # 상품 라벨 목록 생성
+            label_to_item = {
+                (it.get("product_name") or it["url"][:30] + "..."): it
+                for it in all_items_for_select
+            }
+            all_labels = list(label_to_item.keys())
+
+            # 전체 선택 체크박스
+            select_all = st.checkbox("전체 선택", key="select_all_checkbox")
+            selected_labels = st.multiselect(
+                "수집할 상품 선택",
+                options=all_labels,
+                default=all_labels if select_all else [],
+                key="selected_products",
+                label_visibility="collapsed"
+            )
+
+            selected_items = [label_to_item[label] for label in selected_labels]
+
+            if "collecting_selected" not in st.session_state:
+                st.session_state["collecting_selected"] = False
+
+            btn_label = f"⏳ 수집 중... ({len(selected_labels)}개)" if st.session_state["collecting_selected"] \
+                else f"🚀 선택 수집 ({len(selected_labels)}개)"
+
+            if st.button(
+                btn_label,
+                disabled=st.session_state["collecting_selected"] or len(selected_labels) == 0,
+                use_container_width=True
+            ):
+                st.session_state["collecting_selected"] = True
+                st.session_state["selected_items_to_collect"] = selected_items
+                st.rerun()
+
+            # 선택 수집 실행
+            if st.session_state["collecting_selected"]:
+                items_to_collect = st.session_state.get("selected_items_to_collect", [])
+                total = len(items_to_collect)
+                success_count = 0
+
+                progress = st.progress(0, text="선택 수집 시작...")
+                for i, it in enumerate(items_to_collect):
+                    name = it.get("product_name") or it["url"][:25]
+                    progress.progress(i / total, text=f"수집 중... ({i+1}/{total}) {name}")
+                    p, r, code = get_klook_data(it["url"])
+                    if p is not None or r is not None:
+                        save_log_with_limit(it["url"], p, r)
+                        success_count += 1
+
+                progress.progress(1.0, text="완료!")
+                st.session_state["collecting_selected"] = False
+                st.session_state["selected_items_to_collect"] = []
+                st.toast(f"✅ 선택 수집 완료! ({success_count}/{total}개 성공)")
+                st.rerun()
 
     st.divider()
 
